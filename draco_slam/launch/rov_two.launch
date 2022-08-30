@@ -1,0 +1,37 @@
+<launch>
+
+    <!-- params-->
+    <arg name="rov" default="rov_two"/>
+    <arg name="enable_slam" default="true"/>
+    <arg name="number_of_robots" default="3"/>
+
+    <!-- Start up ROV one -->
+    <group ns="$(arg rov)">
+        
+        <!-- Start the dead reckoning system -->
+        <node pkg="bruce_slam" name="localization" type="dead_reckoning_node.py" output="screen">
+            <rosparam command="load" file="$(find bruce_slam)/config/dead_reckoning.yaml"/>
+            <param name="rov_number" value="$(arg rov)"/>
+        </node>
+
+        <!-- Start the sonar feature extraction system-->
+        <node pkg="bruce_slam" name="feature_extraction" type="feature_extraction_node.py" output="screen">
+            <rosparam command="load" file="$(find bruce_slam)/config/feature.yaml" subst_value="true"/>
+            <param name="rov_number" value="$(arg rov)"/>
+        </node>
+
+        <!-- Start the SLAM system-->
+        <node pkg="draco_slam" name="slam" type="multi_robot_slam_node.py" output="screen">
+            <rosparam command="load" file="$(find bruce_slam)/config/slam.yaml" subst_value="true"/>
+            <rosparam command="load" file="$(find draco_slam)/config/multi_robot.yaml" subst_value="true"/>
+            <param name="rov_number" value="$(arg rov)"/>
+            <param name="number_of_robots" value="$(arg number_of_robots)"/>
+            <param name="enable_slam" value="$(arg enable_slam)"/>
+            <param name="save_fig" value="false"/>
+        </node>
+
+        <!-- define a tf to show things in RVIZ-->
+        <node pkg="tf" name="map_to_world_tf_publisher" type="static_transform_publisher" args="0 -55 0 0 0 3.14159 world rov_two_map 100"/>
+
+    </group>
+</launch>
