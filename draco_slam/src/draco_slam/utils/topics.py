@@ -2,22 +2,27 @@
 Topics for the draco_slam project
 """
 
-#sensor topic
-IMU_TOPIC = "/vn100/imu/raw"
-DVL_TOPIC = "/rti/body_velocity/raw"
-DEPTH_TOPIC = "/bar30/depth/raw"
-SONAR_TOPIC = "/sonar_oculus_node/ping"
+# sensor topic
+IMU_TOPIC = "vn100/imu/raw"
+IMU_TOPIC_MK_II = "vectornav/IMU"
+DVL_TOPIC = "rti/body_velocity/raw"
+DEPTH_TOPIC = "bar30/depth/raw"
+SONAR_TOPIC = "sonar_oculus_node/M750d/ping"
+SONAR_TOPIC_UNCOMPRESSED = "sonar_oculus_node/ping"
+SONAR_VERTICAL_TOPIC = "sonar_oculus_node/M1200d/ping"
+GYRO_TOPIC = "gyro"
 
-#inter robot comms topics
+# inter robot comms topics
 RING_KEY_TOPIC = "/common/ring_keys"
 DATA_REQUEST_TOPIC = "/common/data_requests"
 KEYFRAME_TOPIC = "/common/keyframes"
 LOOP_CLOSURE_TOPIC = "/common/loop_closures"
 STATE_UPDATE_TOPIC = "/common/state_updates"
 
-#SLAM topics
+# SLAM topics
 SLAM_NS = ""
 LOCALIZATION_ODOM_TOPIC = SLAM_NS + "localization/odom"
+LOCALIZATION_ODOM_TOPIC_MKII = SLAM_NS + "localization/odom_live"
 LOCALIZATION_TRAJ_TOPIC = SLAM_NS + "localization/traj"
 SLAM_POSE_TOPIC = SLAM_NS + "slam/pose"
 SLAM_ODOM_TOPIC = SLAM_NS + "slam/odom"

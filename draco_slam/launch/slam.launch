@@ -1,10 +1,11 @@
 <launch>
-    <arg name="rviz" default="false"/>
+    <param name="/use_sim_time" value="true"/>
+    <arg name="rviz" default="true"/>
 
     <include file="$(find draco_slam)/launch/rov_one.launch"/>
     <include file="$(find draco_slam)/launch/rov_two.launch"/>
     <include file="$(find draco_slam)/launch/rov_three.launch"/>
 
-    <node if="$(arg rviz)" type="rviz" name="rviz" pkg="rviz" args="-d $(find bruce_slam)/rviz/video.rviz" />
+    <node if="$(arg rviz)" type="rviz" name="rviz" pkg="rviz" args="-d $(find draco_slam)/config/three_robot.rviz" />
 
 </launch>

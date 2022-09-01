@@ -1,5 +1,17 @@
-from logging import raiseExceptions
+# python imports
+import threading
+import tf
 import rospy
+import cv_bridge
+from nav_msgs.msg import Odometry
+from message_filters import  Subscriber
+from sensor_msgs.msg import PointCloud2
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import PoseWithCovarianceStamped
+from message_filters import ApproximateTimeSynchronizer
+
+# Argonaut imports
+from sonar_oculus.msg import OculusPing
 
 from bruce_slam.slam_ros import SLAMNode
 from draco_slam.utils.topics import *
@@ -8,10 +20,105 @@ from draco_slam.msg import RingKey,DataRequest,KeyframeImage,LoopClosure,PoseHis
 class MultiRobotSLAM(SLAMNode):
 
     def __init__(self) -> None:
-        super().__init__()
+        super(MultiRobotSLAM, self).__init__()
 
-    def init_multi_robot(self, ns="~") -> None:
+    def init_node(self, ns="~") -> None:
 
+        #keyframe paramters, how often to add them
+        self.keyframe_duration = rospy.get_param(ns + "keyframe_duration")
+        self.keyframe_duration = rospy.Duration(self.keyframe_duration)
+        self.keyframe_translation = rospy.get_param(ns + "keyframe_translation")
+        self.keyframe_rotation = rospy.get_param(ns + "keyframe_rotation")
+
+        #SLAM paramter, are we using SLAM or just dead reckoning
+        # TODO remove this param
+        self.enable_slam = rospy.get_param(ns + "enable_slam")
+        print("SLAM STATUS: ", self.enable_slam)
+
+        #noise models
+        self.prior_sigmas = rospy.get_param(ns + "prior_sigmas")
+        self.odom_sigmas = rospy.get_param(ns + "odom_sigmas")
+        self.icp_odom_sigmas = rospy.get_param(ns + "icp_odom_sigmas")
+
+        #resultion for map downsampling
+        self.point_resolution = rospy.get_param(ns + "point_resolution")
+
+        #sequential scan matching parameters (SSM)
+        self.ssm_params.enable = rospy.get_param(ns + "ssm/enable")
+        self.ssm_params.min_points = rospy.get_param(ns + "ssm/min_points")
+        self.ssm_params.max_translation = rospy.get_param(ns + "ssm/max_translation")
+        self.ssm_params.max_rotation = rospy.get_param(ns + "ssm/max_rotation")
+        self.ssm_params.target_frames = rospy.get_param(ns + "ssm/target_frames")
+
+        #non sequential scan matching parameters (NSSM) aka loop closures
+        self.nssm_params.enable = rospy.get_param(ns + "nssm/enable")
+        self.nssm_params.min_st_sep = rospy.get_param(ns + "nssm/min_st_sep")
+        self.nssm_params.min_points = rospy.get_param(ns + "nssm/min_points")
+        self.nssm_params.max_translation = rospy.get_param(ns + "nssm/max_translation")
+        self.nssm_params.max_rotation = rospy.get_param(ns + "nssm/max_rotation")
+        self.nssm_params.source_frames = rospy.get_param(ns + "nssm/source_frames")
+        self.nssm_params.cov_samples = rospy.get_param(ns + "nssm/cov_samples")
+
+        #pairwise consistency maximization parameters for loop closure 
+        #outliar rejection
+        self.pcm_queue_size = rospy.get_param(ns + "pcm_queue_size")
+        self.min_pcm = rospy.get_param(ns + "min_pcm")
+
+        #mak delay between an incoming point cloud and dead reckoning
+        self.feature_odom_sync_max_delay = 0.5
+
+        #define the subsrcibing topics
+        self.feature_sub = Subscriber(SONAR_FEATURE_TOPIC, PointCloud2)
+        self.odom_sub = Subscriber(LOCALIZATION_ODOM_TOPIC, Odometry)
+
+        #define the sync policy
+        self.time_sync = ApproximateTimeSynchronizer(
+            [self.feature_sub, self.odom_sub], 20, 
+            self.feature_odom_sync_max_delay, allow_headerless = False)
+
+        #register the callback in the sync policy
+        self.time_sync.registerCallback(self.SLAM_callback)
+
+        # odom sub for republising the pose at a higher rate
+        # self.odom_sub_repub = rospy.Subscriber(LOCALIZATION_ODOM_TOPIC_MKII, Odometry, callback=self.odom_callback,queue_size=200)
+
+        #pose publisher
+        self.pose_pub = rospy.Publisher(
+            SLAM_POSE_TOPIC, PoseWithCovarianceStamped, queue_size=10)
+
+        #dead reckoning topic
+        self.odom_pub = rospy.Publisher(SLAM_ODOM_TOPIC, Odometry, queue_size=10)
+
+        #SLAM trajectory topic
+        self.traj_pub = rospy.Publisher(
+            SLAM_TRAJ_TOPIC, PointCloud2, queue_size=1, latch=True)
+
+        #constraints between poses
+        self.constraint_pub = rospy.Publisher(
+            SLAM_CONSTRAINT_TOPIC, Marker, queue_size=1, latch=True)
+
+        #point cloud publisher topic
+        self.cloud_pub = rospy.Publisher(
+            SLAM_CLOUD_TOPIC, PointCloud2, queue_size=1, latch=True)
+
+        #tf broadcaster to show pose
+        self.tf = tf.TransformBroadcaster()
+
+        #cv bridge object
+        self.CVbridge = cv_bridge.CvBridge()
+
+        #get the ICP configuration from the yaml fukle
+        icp_config = rospy.get_param(ns + "icp_config")
+        #icp_ssm_config = rospy.get_param(ns + "icp_ssm_config")
+        self.icp.loadFromYaml(icp_config)
+        #self.icp_ssm.loadFromYaml(icp_ssm_config)
+
+        #call the configure function
+        self.configure()
+        
+        self.init_multi_robot(ns)
+
+    def init_multi_robot(self,ns) -> None:
 
         # get the rov ID and the number of robots in the system
         self.rov_id = rospy.get_param(ns + "rov_number")
@@ -26,7 +133,6 @@ class MultiRobotSLAM(SLAMNode):
             self.id_code = 3
         else:
             self.id_code = None
-
 
         #pull the ablation study params
         self.case_type = rospy.get_param(ns + "study/case")
@@ -84,19 +190,18 @@ class MultiRobotSLAM(SLAMNode):
 
 
         #define all the publishers and subscribers for the multi-robot system
-        size = 50
 
         # ring key exchange
         self.ring_key_pub = rospy.Publisher(RING_KEY_TOPIC,RingKey,queue_size=5)
-        self.ring_key_sub = rospy.Subscriber(RING_KEY_TOPIC,RingKey,callback=self.ring_key_callback, queue_size=size)
+        self.ring_key_sub = rospy.Subscriber(RING_KEY_TOPIC,RingKey,callback=self.ring_key_callback, queue_size=50)
 
         # point cloud request exchange
         self.request_pub = rospy.Publisher(DATA_REQUEST_TOPIC,DataRequest,queue_size=5)
-        self.request_sub = rospy.Subscriber(DATA_REQUEST_TOPIC,DataRequest,callback=self.request_callback,queue_size=size) 
+        self.request_sub = rospy.Subscriber(DATA_REQUEST_TOPIC,DataRequest,callback=self.request_callback,queue_size=50) 
 
         # actual point cloud data exchange
         self.key_frame_pub = rospy.Publisher(KEYFRAME_TOPIC, KeyframeImage, queue_size=5)
-        self.key_frame_sub = rospy.Subscriber(KEYFRAME_TOPIC, KeyframeImage, callback=self.keyframe_callback, queue_size=size)
+        self.key_frame_sub = rospy.Subscriber(KEYFRAME_TOPIC, KeyframeImage, callback=self.keyframe_callback, queue_size=50)
         
         # loop closure exchange
         self.loop_closure_pub = rospy.Publisher(LOOP_CLOSURE_TOPIC,LoopClosure,queue_size=5)
@@ -109,18 +214,16 @@ class MultiRobotSLAM(SLAMNode):
         # dummy topic to make global registration run
         self.dummy_pub = rospy.Publisher("/" + self.rov_id + "/slam/global_reg_run", Dummy, queue_size=5)
         self.dummy_sub = rospy.Subscriber("/" + self.rov_id + "/slam/global_reg_run", Dummy, callback=self.global_registration_callback,
-                                                                                queue_size=size)
+                                                                                queue_size=50)
         
         # shutdown sub
         self.shutdown_sub = rospy.Subscriber("/" + self.rov_id + "/slam/shutdown", Dummy, callback=self.shutdown_callback,
-                                                                                queue_size=size)
+                                                                                queue_size=50)
 
         # dummy topic to make the search thread run
         self.search_pub = rospy.Publisher("/" + self.rov_id + "/slam/search", Dummy, queue_size=5)
         self.search_sub = rospy.Subscriber("/" + self.rov_id + "/slam/search", Dummy, callback=self.search_callback,
-                                                                                queue_size=size)
-
-
+                                                                                queue_size=50)
 
     def ring_key_callback(self, msg : RingKey) -> None:
         pass
