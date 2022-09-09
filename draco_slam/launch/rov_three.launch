@@ -9,19 +9,19 @@
     <group ns="$(arg rov)">
         
         <!-- Start the dead reckoning system -->
-        <node pkg="draco_slam" name="localization" type="dead_reckoning_node.py" output="screen">
+        <node pkg="draco_slam" name="rov_three_localization" type="dead_reckoning_node.py" output="screen">
             <rosparam command="load" file="$(find bruce_slam)/config/dead_reckoning.yaml"/>
             <param name="rov_number" value="$(arg rov)"/>
         </node>
 
         <!-- Start the sonar feature extraction system-->
-        <node pkg="draco_slam" name="feature_extraction" type="feature_extraction_node.py" output="screen">
+        <node pkg="draco_slam" name="rov_three_feature_extraction" type="feature_extraction_node.py" output="screen">
             <rosparam command="load" file="$(find bruce_slam)/config/feature.yaml" subst_value="true"/>
             <param name="rov_number" value="$(arg rov)"/>
         </node>
 
         <!-- Start the SLAM system-->
-        <node pkg="draco_slam" name="slam" type="multi_robot_slam_node.py" output="screen">
+        <node pkg="draco_slam" name="rov_three_slam" type="multi_robot_slam_node.py" output="screen">
             <rosparam command="load" file="$(find bruce_slam)/config/slam.yaml" subst_value="true"/>
             <rosparam command="load" file="$(find draco_slam)/config/multi_robot.yaml" subst_value="true"/>
             <param name="rov_number" value="$(arg rov)"/>
