@@ -1,5 +1,6 @@
 # python imports
 import threading
+from typing import Tuple
 import tf
 import rospy
 import gtsam
@@ -27,6 +28,7 @@ from bruce_slam.slam_objects import Keyframe
 from draco_slam.utils.topics import *
 from draco_slam.msg import RingKey,DataRequest,KeyframeImage,LoopClosure,PoseHistory,Dummy
 from draco_slam.multi_robot_registration import MultiRobotRegistration
+from draco_slam.multi_robot_objects import ICPResultInterRobot
 
 class MultiRobotSLAM(SLAMNode):
 
@@ -83,7 +85,7 @@ class MultiRobotSLAM(SLAMNode):
 
         #define the sync policy
         self.time_sync = ApproximateTimeSynchronizer(
-            [self.feature_sub, self.odom_sub], 20, 
+            [self.feature_sub, self.odom_sub], 1000, 
             self.feature_odom_sync_max_delay, allow_headerless = False)
 
         #register the callback in the sync policy
@@ -142,8 +144,6 @@ class MultiRobotSLAM(SLAMNode):
             self.vin = 2
         elif self.rov_id == "rov_three":
             self.vin = 3
-        else:
-            self.vin = None
 
         #pull the ablation study params
         self.case_type = rospy.get_param(ns + "study/case")
@@ -229,11 +229,6 @@ class MultiRobotSLAM(SLAMNode):
         
         # shutdown sub
         self.shutdown_sub = rospy.Subscriber("/" + self.rov_id + "/slam/shutdown", Dummy, callback=self.shutdown_callback,
-                                                                                queue_size=50)
-
-        # dummy topic to make the search thread run
-        self.search_pub = rospy.Publisher("/" + self.rov_id + "/slam/search", Dummy, queue_size=5)
-        self.search_sub = rospy.Subscriber("/" + self.rov_id + "/slam/search", Dummy, callback=self.search_callback,
                                                                                 queue_size=50)
 
         # define the central registration job queue
@@ -355,7 +350,7 @@ class MultiRobotSLAM(SLAMNode):
 
             #if loop closures are enabled
             #nonsequential scan matching is True (a loop closure occured) update graph again
-            if self.nssm_params.enable  and self.add_nonsequential_scan_matching():
+            if self.nssm_params.enable and self.add_nonsequential_scan_matching():
                 self.update_factor_graph()
 
             self.build_ring_key() # build the ring key for the most recent cloud
@@ -367,7 +362,7 @@ class MultiRobotSLAM(SLAMNode):
         self.current_frame = frame
         self.publish_all()
         self.lock.release()
-
+        
     def ring_key_callback(self, msg : RingKey) -> None:
         """This is a the first step in the multi-robot SLAM system. 
         Here we will perform the following tasks in the order below. 
@@ -381,7 +376,6 @@ class MultiRobotSLAM(SLAMNode):
             msg (RingKey): A ring key message, ring key scene descriptor, 
                 pose in the sending robots frame and keyframe index
         """
-
 
         # we don't need to look at out own ring keys
         if msg.vin == self.vin:
@@ -500,15 +494,17 @@ class MultiRobotSLAM(SLAMNode):
         if msg.target_vin != self.vin:
             return
         
-        self.lock.acquire()
+        '''self.lock.acquire()
         keyframes_ = list(self.keyframes) # copy the keyframes and dump the lock
-        self.lock.release()
+        self.lock.release()'''
+
+        requester_vin = msg.requester_vin
 
         # loop over the list of requested keyframes
         for i in list(msg.data):
 
             # fetch the frame
-            frame = keyframes_[i] 
+            frame = self.keyframes[i]
             pose = g2n(frame.pose3) #get the 3D pose as a numpy array
             
             #prep the message
@@ -516,26 +512,137 @@ class MultiRobotSLAM(SLAMNode):
             msg.cloud = n2r(np.c_[frame.points, np.zeros_like(frame.points[:,0])], "PointCloudXYZ") # push the point cloud
             msg.pose = [pose[0], pose[1], pose[2], pose[5]] # push the pose
             msg.vin = self.vin # push our own vehicle ID 
-            msg.requester_vin = msg.requester_vin
+            msg.requester_vin = requester_vin
             msg.keyframe_id = i
             self.key_frame_pub.publish(msg)
 
     def keyframe_callback(self, msg : KeyframeImage) -> None:
-        pass
+        """manage the incoming keyframes, these keyframes have been requested after Kdtree search
 
+        Args:
+            msg (KeyframeImage): the incoming keyframe
+        """
+        
+        #if we did not request this, we do not need it 
+        if msg.requester_vin != self.vin:
+            return
+
+        #if we sent this, we do not need it
+        if msg.vin == self.vin:
+            return
+
+        #parse out the message
+        points = ros_numpy.point_cloud2.pointcloud2_to_xyz_array(msg.cloud)[:,:2] #decode the cloud
+        
+        #if we are using point cloud compression
+        #@if self.point_compression and points is not None and len(points) > 0:
+        #    pass
+            #points_zipped,xmin,ymin = self.zip_points(points,self.point_compression_resolution)
+            #points = self.unzip_points(points_zipped,self.point_compression_resolution,xmin,ymin)
+
+        pose_their_frame = msg.pose #get the pose
+        pose_their_frame = gtsam.Pose2(pose_their_frame[0],pose_their_frame[1],pose_their_frame[3]) #make it a gtsam object
+        keyframe_id = msg.keyframe_id
+        vin = msg.vin
+        
+        #perform the updates
+        self.lock.acquire()
+        self.message_pool[vin].update_keyframe(pose_their_frame,points,keyframe_id) #update the regisgtration system with this cloud
+        self.outside_frames[vin][keyframe_id] = keyframe_id #update the hash table to indicate we have recived this message, do not request it again
+        self.lock.release()
+
+        # send a message to trip the global registration callback
+        self.dummy_pub.publish(Dummy())
+
+    def global_registration_callback(self, msg : Dummy) -> None:
+        """A callback to manage the registration between robot point clouds
+
+        Args:
+            msg (Dummy): a dummy message to make this callback run
+        """
+
+        # we need to touch shared memory, pick up the lock
+        self.lock.acquire()
+
+        #check if we have any jobs to run
+        if len(self.frames_to_check) == 0:
+            self.lock.release()
+            return
+
+        #parse the job queue, get the oldest job
+        my_keys, their_keys, vin_list = self.frames_to_check[0]
+
+        #check if we have the required data for this job
+        if self.check_job(their_keys,vin_list) == False:
+            self.dummy_pub.publish(Dummy())
+            self.lock.release()
+            return
+
+        #copy the keyframe lists so we can release the lock
+        my_keyframes = list(self.keyframes)
+        message_pool_copy = dict(self.message_pool)
+        self.lock.release() #we release here so this thread can run without holding up the SLAM thread
+
+        #case 1: [unkown number inside keyframes], [a single outside keyframe], [a single vin]
+        #case 2: [a single inside keyframe], [unkown number of outside keyframes], [unkown number of vins,len is same as before]
+        job_status, loop  = self.run_global_registration(my_keys,
+                                                            their_keys,
+                                                            vin_list,
+                                                            my_keyframes,
+                                                            message_pool_copy
+                                                            )
+
+        #now we need to touch shared memory, pick up a lock
+        self.lock.acquire()
+        self.frames_to_check.pop(0) #update the job tracker, this job is complete
+
+        #if we got nothing from the above search, go ahead and return
+        if job_status == False:
+            if len(self.frames_to_check) != 0: #if there are more jobs, send a message to run this callback again
+                self.dummy_pub.publish(Dummy())
+            self.lock.release()
+            return
+
+        #log the loop to the appropriate data structure
+        self.multi_robot_queue[loop.vin].append(loop) 
+
+        #maintain the multi-robot PCM queue
+        if self.use_pcm:
+            while (self.multi_robot_queue[loop.vin] and loop.target_key - self.multi_robot_queue[loop.vin][0].target_key > self.multi_robot_pcm_queue_size):
+                self.multi_robot_queue[loop.vin].pop(0)
+        queue = list(self.multi_robot_queue[loop.vin]) #copy the queue before we release the lock
+        self.lock.release() #release the lock so we can do PCM without holding up other threads
+
+        #call PCM
+        # here we do not use PCM for ALCS loop closures only DRACO
+        if self.use_pcm:
+            pcm = self.verify_pcm(queue, self.multi_robot_min_pcm)
+        else:
+            pcm = [len(queue)-1]
+
+        if len(pcm) > 0:
+            self.lock.acquire()
+            #self.publish_multi_robot_registration(self.vis_pcm_result(pcm,loop.vin)) #vis pcm results
+            #self.merge_queue(pcm,loop.vin) #merge the recent loop closures
+            #if self.home[loop.vin] is None and self.alcs_enable:
+            #    self.multi_robot_queue[loop.vin] = [] # clear the queue for this robot
+            #self.update_factor_graph() #update the factor graph
+            #self.publish_trajectory()
+            #self.publish_constraint()
+            #self.publish_point_cloud_merged()
+            #self.publish_slam_update()
+            #self.publish_partner_trajectory()
+            self.lock.release()
+
+        self.dummy_pub.publish(Dummy())
+        
     def loop_closure_callback(self, msg : LoopClosure) -> None:
         pass
 
     def listen_for_state(self, msg : PoseHistory) -> None:
         pass
 
-    def global_registration_callback(self, msg : Dummy) -> None:
-        pass
-
     def shutdown_callback(self, msg : Dummy) -> None:
-        pass
-
-    def search_callback(self, msg : Dummy) -> None:
         pass
 
     def get_scan_context(self,points : np.array) -> np.array:
@@ -633,6 +740,78 @@ class MultiRobotSLAM(SLAMNode):
             if frame.ring_key is not None:
                 keys.append(frame.ring_key)
         return KDTree(keys)
+
+    def check_job(self,their_keys:list,vin_list:list)->bool:
+        """Checks if the job can be completed, check if the data required for the job is here
+
+        Args:
+            their_keys (list): list of a single element of an outside keyframe
+            vin_list (list): list of a single element of the outside vin
+
+        Returns:
+            bool: if the job can run, if the point clouds are present
+        """
+
+        #check if we have the required data to run the job
+        for their_key,search_vin in zip(their_keys,vin_list):
+            if self.message_pool[search_vin].keyframes[their_key].context is None: #do we have context yet?
+                for i in range(their_key-1,their_key+2): #loop over the frames needed for context
+                    if (i >= len(self.message_pool[search_vin].keyframes) or 
+                                    self.message_pool[search_vin].keyframes[i].points is None):
+                                    return False # we do not have the required data for this job
+                self.message_pool[search_vin].update_scan_context(their_key) #update the scan context image
+
+
+    def run_global_registration(self,my_keys:list,their_keys:list,vin_list:list,
+                                                my_keyframes:list,message_pool_copy:dict)->Tuple[bool,np.array]:
+        """Perform a global registration run
+
+        Args:
+            my_keys (list): the keyframe indexes from my own SLAM solution
+            their_keys (list): the keyframe indexes from the outside robots
+            vin_list (list): the vin for each of the above outside robot keyframes
+            my_keyframes (list): a copy of my keyframes
+            message_pool_copy (dict): a copy of the message pool
+
+        Returns:
+            Tuple[bool,np.array]: [status flag, results if there are any, run time on a step wise basis]
+        """
+
+        #containers for loop closures
+        cost = [] 
+        loops = []
+
+        #loop over the job, this loop is NOT N^2 as one of the lists will always have exactly 1 item
+        for my_key in my_keys: #loop over each of my keys
+            for their_key,search_vin in zip(their_keys,vin_list): #loop over the outside key and the vin associated with that key
+
+                # Check if we have run this job before, no repeats
+                if (search_vin,their_key,my_key) not in self.tested_jobs:
+                    self.tested_jobs[(search_vin,their_key,my_key)] = True # log that we have run this job
+                
+                    result, status, message = message_pool_copy[search_vin].compare_frames(my_keyframes[my_key],
+                                                            message_pool_copy[search_vin].keyframes[their_key]) 
+
+                    # if the above registration method returned a good result package it up as a loop closure
+                    if status:
+                        # overlap, fit_score, pose_between_frames, pose_global, None
+                        overlap, fit_score, _, pose_global, covariance = result #parse out the results
+                        cost.append(overlap) #log the cost, in this case overlap
+                        loop = ICPResultInterRobot(my_key,  #push the results into a ICP results object
+                                                    their_key,
+                                                    my_keyframes[my_key].pose,
+                                                    pose_global,
+                                                    fit_score,
+                                                    overlap,
+                                                    search_vin,
+                                                    covariance,
+                                                    )
+                        loops.append(loop)
+
+        if len(loops) != 0:
+            return True, loops[np.argmax(cost)] #only return the best one
+        else:
+            return False, None #we got nothing, indicate that
 
     
     
