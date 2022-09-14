@@ -23,9 +23,12 @@ from sonar_oculus.msg import OculusPing
 from bruce_slam.slam_ros import SLAMNode
 from bruce_slam.utils.conversions import *
 from bruce_slam.slam_objects import Keyframe
+from bruce_slam.utils.visualization import *
+from bruce_slam import pcl
 
 # draco imports
 from draco_slam.utils.topics import *
+from draco_slam.utils.conversions import Y,Z
 from draco_slam.msg import RingKey,DataRequest,KeyframeImage,LoopClosure,PoseHistory,Dummy
 from draco_slam.multi_robot_registration import MultiRobotRegistration
 from draco_slam.multi_robot_objects import ICPResultInterRobot
@@ -51,6 +54,8 @@ class MultiRobotSLAM(SLAMNode):
         self.prior_sigmas = rospy.get_param(ns + "prior_sigmas")
         self.odom_sigmas = rospy.get_param(ns + "odom_sigmas")
         self.icp_odom_sigmas = rospy.get_param(ns + "icp_odom_sigmas")
+        self.inter_robot_sigmas = rospy.get_param(ns + "inter_robot_sigmas")
+        self.partner_robot_sigmas = rospy.get_param(ns + "partner_robot_sigmas")
 
         #resultion for map downsampling
         self.point_resolution = rospy.get_param(ns + "point_resolution")
@@ -165,6 +170,10 @@ class MultiRobotSLAM(SLAMNode):
         self.multi_robot_pcm_queue_size = rospy.get_param(ns + "multi_robot_pcm_queue_size")
         self.multi_robot_min_pcm = rospy.get_param(ns + "multi_robot_min_pcm")
 
+        #define the noise models
+        self.inter_robot_model = self.create_noise_model(self.inter_robot_sigmas)
+        self.partner_robot_model = self.create_noise_model(self.partner_robot_sigmas)
+
         #multi-robot-registration
         self.mrr_max_tree_cost = rospy.get_param(ns + "mrr/max_tree_cost")
         self.mrr_min_points = rospy.get_param(ns + "mrr/min_points")
@@ -220,7 +229,7 @@ class MultiRobotSLAM(SLAMNode):
 
         # state update exchange
         self.state_pub = rospy.Publisher(STATE_UPDATE_TOPIC,PoseHistory,queue_size=5)
-        self.state_sub = rospy.Subscriber(STATE_UPDATE_TOPIC,PoseHistory,callback=self.listen_for_state,queue_size=5)
+        self.state_sub = rospy.Subscriber(STATE_UPDATE_TOPIC,PoseHistory,callback=self.state_update_callback,queue_size=5)
 
         # dummy topic to make global registration run
         self.dummy_pub = rospy.Publisher("/" + self.rov_id + "/slam/global_reg_run", Dummy, queue_size=5)
@@ -230,6 +239,16 @@ class MultiRobotSLAM(SLAMNode):
         # shutdown sub
         self.shutdown_sub = rospy.Subscriber("/" + self.rov_id + "/slam/shutdown", Dummy, callback=self.shutdown_callback,
                                                                                 queue_size=50)
+
+        #multi-robot registration results
+        self.registration_pub = rospy.Publisher(
+            "registration_results", PointCloud2, queue_size=5, latch=True)
+
+        self.merged_pub = rospy.Publisher(
+            "merged", PointCloud2, queue_size=5)
+
+        self.partner_traj_pub = rospy.Publisher(
+            PARTNER_TRAJECTORY_TOPIC, Marker, queue_size=1, latch=True)
 
         # define the central registration job queue
         self.frames_to_check = []
@@ -246,6 +265,8 @@ class MultiRobotSLAM(SLAMNode):
                 robots.append(i+1)
 
         #build the message pool
+        self.send_state = False
+        self.keyframes_multi_robot = []
         self.robots = robots # keep a list of the robots
         self.message_pool = {} # 
         self.outside_frames = {}
@@ -258,6 +279,7 @@ class MultiRobotSLAM(SLAMNode):
         self.partner_covariance = {}
         self.partner_covariance_log = {}
         self.tested_jobs = {}
+        self.outside_frames_added = {}
         keys = ["y","z"]
         for robot,k in zip(robots,keys):
             self.partner_trajectory[robot] = []
@@ -470,11 +492,11 @@ class MultiRobotSLAM(SLAMNode):
                 job_indexes.append(real_indexes[id]) # get the index in the vin.keyframes
 
             # euclidan space filtering
-            '''if len(job_indexes) != 0:
+            if len(job_indexes) != 0:
                 vin_for_jobs, job_indexes, distances = self.filter_by_distance2(self.keyframes[-2].pose,
                                                                                 np.array(vin_for_jobs),
                                                                                 np.array(job_indexes),
-                                                                                np.array(distances))'''
+                                                                                np.array(distances))
 
             # log the job to the job quene to be run by the global reg callback
             if len(job_indexes) != 0:
@@ -622,28 +644,48 @@ class MultiRobotSLAM(SLAMNode):
 
         if len(pcm) > 0:
             self.lock.acquire()
-            #self.publish_multi_robot_registration(self.vis_pcm_result(pcm,loop.vin)) #vis pcm results
-            #self.merge_queue(pcm,loop.vin) #merge the recent loop closures
-            #if self.home[loop.vin] is None and self.alcs_enable:
-            #    self.multi_robot_queue[loop.vin] = [] # clear the queue for this robot
-            #self.update_factor_graph() #update the factor graph
-            #self.publish_trajectory()
-            #self.publish_constraint()
-            #self.publish_point_cloud_merged()
-            #self.publish_slam_update()
-            #self.publish_partner_trajectory()
+            self.publish_multi_robot_registration(self.vis_pcm_result(pcm,loop.vin)) #vis pcm results
+            self.merge_queue(pcm,loop.vin) #merge the recent loop closures
+            self.update_factor_graph() #update the factor graph
+            self.publish_all(False)
             self.lock.release()
 
         self.dummy_pub.publish(Dummy())
         
     def loop_closure_callback(self, msg : LoopClosure) -> None:
         pass
+        
+    def state_update_callback(self, msg : PoseHistory) -> None:
+        """Handle an incoming state update message
 
-    def listen_for_state(self, msg : PoseHistory) -> None:
-        pass
+        Args:
+            msg (PoseHistory): the incoming message, the whole time history of poses from 
+            a robot
+        """
+
+        #we do not care about our own state updates
+        if msg.vin == self.vin:
+            return
+
+        self.lock.acquire() #shared memory, pick up the lock
+        data = np.array(list(msg.data))
+        data = np.reshape(data, (len(data)//3,3)) #reshape the message into a Nx3 trajectory [x,y,theta]
+        iter = np.min([len(self.message_pool[msg.vin].keyframes), len(data)]) #loop over whatever is shorter, the state update or keyframes
+        for i in range(iter): #pass the new state vector of to the registration system
+            self.message_pool[msg.vin].keyframes[i].source_pose = gtsam.Pose2(data[i][0],data[i][1],data[i][2])
+        self.update_factor_graph() #update the factor graph
+        self.publish_all(False)
+        self.lock.release()
 
     def shutdown_callback(self, msg : Dummy) -> None:
-        pass
+        """Handle a shutdown message.
+
+        Args:
+            msg (Dummy): the message used to trip this callback
+        """
+
+        # shutdown is easy, just get the lock and never let it go
+        self.lock.acquire()
 
     def get_scan_context(self,points : np.array) -> np.array:
         """Perform scan context for an aggragated point cloud
@@ -812,6 +854,473 @@ class MultiRobotSLAM(SLAMNode):
             return True, loops[np.argmax(cost)] #only return the best one
         else:
             return False, None #we got nothing, indicate that
+
+    def publish_multi_robot_registration(self, points_for_publish:np.array)->None:
+        """Publish points from good registration runs inside the global registration callback
+
+        Args:
+            points_for_publish (np.array): the points we want to publish
+        """
+
+        #publish the registration results
+        if points_for_publish is not None:
+            points_for_publish = np.column_stack((points_for_publish[:,0], 
+                                                    points_for_publish[:,1], 
+                                                    np.zeros(len(points_for_publish)),
+                                                    points_for_publish[:,2]))
+            cloud_msg = n2r(points_for_publish, "PointCloudXYZI")
+            cloud_msg.header.stamp = self.current_keyframe.time
+            cloud_msg.header.frame_id = self.rov_id + "_map"
+            self.registration_pub.publish(cloud_msg)
+        else:
+            points_for_publish = np.array([[np.nan, np.nan, np.nan, np.nan]])
+            cloud_msg = n2r(points_for_publish, "PointCloudXYZI")
+            cloud_msg.header.stamp = self.current_keyframe.time
+            cloud_msg.header.frame_id = self.rov_id + "_map"
+            self.registration_pub.publish(cloud_msg)
+
+    def vis_pcm_result(self,pcm:list,vin:int)->np.array:
+        """Gather the point clouds for a PCM result
+
+        Args:
+            pcm (list): pcm results, the indexes of the queue that are approved
+            vin (int): the vin for the robot we are vis 
+
+        Returns:
+            np.array: point cloud
+        """
+
+        #vis if PCM found some good loop closures
+        out = np.zeros((1,3))
+        for i in pcm:
+            if self.multi_robot_queue[vin][i].inserted == False: # only vis a result once
+                pts = self.message_pool[vin].keyframes[self.multi_robot_queue[vin][i].target_key].points
+                ps = self.multi_robot_queue[vin][i].target_pose
+                pts = pts.dot(ps.matrix()[:2, :2].T) + np.array([ps.x(),ps.y()])
+                pts = np.column_stack(((pts, np.zeros(len(pts)))))
+                out = np.row_stack((out,pts))
+        return out
+
+    def merge_queue(self,pcm:list,vin:int)->None:
+        """Merge the multi-robot measurnments into the SLAM graph, this is after a PCM has been approved
+
+        Args:
+            pcm (list): indexes in the PCM queue that have been approved
+            vin (int): the vehicle ID number for this PCM run
+        """
+
+        self.merged_robots[vin] = True # log that we have merged this robot into our system
+
+        #add the factors that connect to this SLAM graph
+        for i in pcm:
+
+            source_key = self.multi_robot_queue[vin][i].source_key
+            target_key = self.multi_robot_queue[vin][i].target_key
+            
+            source = self.keyframes[source_key]
+            target = self.message_pool[vin].keyframes[target_key]
+
+            source_pose = source.pose
+            target_pose = self.multi_robot_queue[vin][i].target_pose
+
+            pose_between = source_pose.between(target_pose)
+            self.message_pool[vin].keyframes[target_key].pose = target_pose
+
+            #each loop closure only inserted once
+            if self.multi_robot_queue[vin][i].inserted == False:
+                self.multi_robot_queue[vin][i].inserted = True
+
+                #send the loop out to the team
+                self.publish_loop_closure(source_key,target_key,pose_between,vin)
+
+                #build the factor between the poses
+                factor = gtsam.BetweenFactorPose2(
+                        X(source_key),
+                        self.to_symbol(target_key,vin),
+                        pose_between,
+                        self.inter_robot_model)
+
+                #add the factor and the initial guess
+                self.graph.add(factor)
+                if (vin,target_key) not in self.outside_frames_added: # check if we have an initial guess yet
+                    self.keyframes_multi_robot.append(Keyframe(
+                                            True,
+                                            None,
+                                            pose223(target_pose),
+                                            self.message_pool[vin].keyframes[target_key].points, 
+                                            source_pose=self.message_pool[vin].keyframes[target_key].source_pose,
+                                            index=target_key,
+                                            vin = vin,
+                                            index_kf=source_key))
+                    self.outside_frames_added[(vin,target_key)] = True # update the hash table of added frames
+                    self.values.insert(self.to_symbol(target_key,vin), target_pose) # insert the intial guess
+
+    def publish_loop_closure(self,source_key:int,target_key:int,pose_between:gtsam.Pose2,vin:int)->None:
+        """Publish a inter-robot loop closure that we found
+
+        Args:
+            source_key (int): the key for the source frame
+            target_key (int): the key for the target frame
+            pose_between (gtsam.Pose2): gtsam pose between the two frames from GO-ICP
+            vin (int): the vin for the vehicle that this loop closure is WITH
+        """
+
+        msg = LoopClosure()
+        msg.source_key = target_key #flip these on purpose for other robots pose graph
+        msg.target_key = source_key
+        msg.data = list(g2n(pose_between))
+        msg.vin = self.vin #my own vin 
+        msg.loop_vin = vin #the vin of the robot this loop closure is with
+        msg.cloud = n2r(np.c_[self.keyframes[source_key].points, np.zeros_like(self.keyframes[source_key].points[:,0])], "PointCloudXYZ")
+        self.loop_closure_pub.publish(msg)
+
+    def to_symbol(self,key:int,vin:int)->gtsam.symbol:
+        """Given a key (index of keyframes i.e. keyframes[key]), encode it in the proper symbol type
+        Using the vin number. 
+
+        Args:
+            key (int): the index of the keyframe
+            vin (int): vehicle ID number
+
+        Returns:
+            gtsam.symbol: the encoded key as a gtsam symbol
+        """
+
+        if self.multi_robot_symbols[vin] == "y":
+            return Y(key)
+        elif self.multi_robot_symbols[vin] == "z":
+            return Z(key)
+
+    def merge_trajectory(self,isam: gtsam.ISAM2, vin: int) -> gtsam.ISAM2:
+        """Add the robot trajectory to a factor graph to esimate the whole merged system
+
+        Args:
+            isam (gtsam.ISAM2): the instance of SLAM we want to add this trajectory to
+            vin (int): the vin for the vehicle we want to merge
+
+        Returns:
+            gtsam.ISAM2: return the populated ISAM2 instance
+        """
+
+        # make some empty structures
+        graph = gtsam.NonlinearFactorGraph()
+        values = gtsam.Values()
+
+        # if there are not enough keyframes, don't do anything
+        if len(self.message_pool[vin].keyframes) <= 3:
+            return isam
+
+        # loop over all the keyframes
+        run = False
+        for i in range(len(self.message_pool[vin].keyframes)-1):
+
+            # TODO do we need this?
+            run = True
+
+            # make sure we have a source pose for this frame
+            if self.message_pool[vin].keyframes[i].source_pose is None:
+                continue
+            
+            # if there is no intial guess, build one
+            if self.message_pool[vin].keyframes[i].guess_pose is None:
+                self.message_pool[vin].keyframes[i].guess_pose = self.home[vin].compose(
+                                                        self.message_pool[vin].keyframes[i].source_pose)
+
+            # get the pose between sequential frames
+            pose_between = self.message_pool[vin].keyframes[i].source_pose.between(
+                                            self.message_pool[vin].keyframes[i+1].source_pose)
+
+            factor = gtsam.BetweenFactorPose2( # build it as a factor
+                        self.to_symbol(i,vin),
+                        self.to_symbol(i+1,vin),
+                        pose_between,
+                        self.partner_robot_model)
+            graph.add(factor) # add the factor
+
+            # if this frame is not a multi-robot keyframe via ICP, then we need an intitial guess
+            if (vin,i) not in self.outside_frames_added:
+                values.insert(self.to_symbol(i,vin),self.message_pool[vin].keyframes[i].guess_pose) # add the initial guess
+    
+        # handle the last frame, we just need an initial guess here
+        if run == True and (vin,i+1) not in self.outside_frames_added: # check if this frame is added via ICP
+            self.message_pool[vin].keyframes[i+1].guess_pose = self.home[vin].compose(
+                                            self.message_pool[vin].keyframes[i+1].source_pose)
+            values.insert(self.to_symbol(i+1,vin),self.message_pool[vin].keyframes[i+1].guess_pose) # add the initial guess for the last frame
+
+        # update the isam object that was passed into this function
+        isam.update(graph, values)
+
+        return isam
+
+    def update_factor_graph(self, keyframe: Keyframe=None):
+        """Update the factor graph, this is called after we have inserted new factors.
+
+        Args:
+            keyframe (Keyframe, optional): A keyframe that needs to be added. Defaults to None.
+        """
+
+        # log if we need to
+        if keyframe:
+            self.keyframes.append(keyframe)
+
+        # update the ISAM2 instance and clear out the graph/values objects
+        self.isam.update(self.graph, self.values)
+        self.graph.resize(0)
+        self.values.clear()
+
+        # pull the slam result
+        values = self.isam.calculateEstimate()
+        isam = gtsam.ISAM2(self.isam) # make a copy of the ISAM2 instance
+
+        # check to see if we have any partner robot frames in our factor graph
+        if len(self.keyframes_multi_robot) != 0:
+            # if we have any merged frames, we need to see which robots have been merged
+            # and add their trajectories to our factor graph
+            for robot in self.robots: # loop over the robots in the system
+                if self.home[robot] is not None: # check if this robot has been merged
+                    isam = self.merge_trajectory(isam,robot) # merge the robots trajectory into my graph
+            values = isam.calculateEstimate() # get the pose graph estimate using the combined graph
+
+            # update our multi-robot keyframes
+            for y in range(len(self.keyframes_multi_robot)):
+                if self.home[self.keyframes_multi_robot[y].vin] is not None: # check for merge
+                    # grab and update the pose
+                    pose = values.atPose2(self.to_symbol(self.keyframes_multi_robot[y].index, self.keyframes_multi_robot[y].vin))
+                    self.keyframes_multi_robot[y].update(pose)
+
+            # update the trajectory estimate for each robot in the system
+            for robot in self.robots:
+                if self.home[robot] is not None: # check if we have a reference frame for the other robot
+                    partner_trajectory = []
+                    for y in range(0, len(self.message_pool[robot].keyframes)): # loop over all the keyframes for this robot
+                        if values.exists(self.to_symbol(y,robot)):
+                            pose = values.atPose2(self.to_symbol(y,robot)) # get the pose
+                            self.message_pool[robot].keyframes[y].guess_pose = pose # set this pose as the new intitial guess
+                            partner_trajectory.append(g2n(pose)) # log it to the vis trajectory
+                    self.partner_trajectory[robot] = np.array(partner_trajectory) # push it to the table that stores all the traj
+                
+                # we do NOT have a reference frame, we need to get one
+                # only try to get a reference frame if we have the data to do so
+                elif self.merged_robots[robot] == True:   
+                    home_arr = dict(self.home_arr) # make a copy of the empty structure
+                    for y in range(len(self.keyframes_multi_robot)): # loop over all the robot keyframes
+                        # check if this keyframe is from the robot we care about
+                        if self.keyframes_multi_robot[y].vin == robot: 
+                            pose = self.keyframes_multi_robot[y].pose
+                            between = self.keyframes_multi_robot[y].source_pose.between(gtsam.Pose2(0,0,0)) #estimate of robots own frame
+                            home_arr[robot].append(g2n(pose.compose(between)))
+                    if len(home_arr[robot]) != 0:
+                        self.home[robot] = gtsam.Pose2(np.mean(np.array(home_arr[robot]),axis=0))
+
+        # Update my own SLAM trajectory
+        errors = []
+        for x in range(len(self.keyframes)):
+            pose = values.atPose2(X(x))
+            errors.append(g2n(self.keyframes[x].pose.between(pose))) # log the change in our pose estimates
+            self.keyframes[x].update(pose)
+        errors = np.array(errors)
+
+        # Only update latest cov
+        cov = self.isam.marginalCovariance(X(len(self.keyframes)- 1))
+        self.keyframes[-1].update(pose, cov)
+
+        #check the error if we need to send out our state vector
+        if len(errors) > 0:
+            euclidan_change = abs(np.max(np.sqrt(errors[:,0]**2 + errors[:,1]**2)))
+            rotation_change = np.degrees(abs(np.max(errors[:,2])))
+            #set the flag
+            if self.mrr_resend_translation != -1:
+                if euclidan_change >= self.mrr_resend_translation or rotation_change >= self.mrr_resend_rotation: 
+                    self.send_state = True
+
+        #update the pose estimates in the PCM queue, this gives the best estimate of what is pairwise consistent
+        for ret in self.nssm_queue:
+            ret.source_pose = self.keyframes[ret.source_key].pose
+            ret.target_pose = self.keyframes[ret.target_key].pose
+            if ret.inserted:
+                ret.estimated_transform = ret.target_pose.between(ret.source_pose)
+
+    def publish_partner_trajectory(self) -> None:
+        """Publish out estimate of the partners trajectory in our own frame
+        """
+
+        # define the vis colors
+        colors = {1:"red", 2:"light_blue", 3:"yellow"}
+
+        # container for the trajectory
+        traj = []
+
+        # loop over all the robots, get their trajectories
+        for robot in self.robots:
+            for x, kf in enumerate(self.partner_trajectory[robot][1:], 1):
+                p1 = self.partner_trajectory[robot][x - 1][0], self.partner_trajectory[robot][x - 1][1], 0.
+                p2 = self.partner_trajectory[robot][x][0], self.partner_trajectory[robot][x][1], 0.
+                traj.append((p1, p2, colors[robot]))
+
+        # if nothing, do nothing
+        if len(traj) > 0:
+            # convert this list to a series of multi-colored lines and publish
+            link_msg = ros_constraints(traj)
+            link_msg.header.stamp = self.current_keyframe.time
+            link_msg.header.frame_id = self.rov_id + "_map"
+            self.partner_traj_pub.publish(link_msg)
+
+    def publish_slam_update(self) -> None:
+        """Send an update to our SLAM solution if it has encoutered a large change
+        """
+
+        if self.send_state: #if we need to send the state
+            data = [] 
+            for frame in self.keyframes:
+                data.append(g2n(frame.pose))
+            data = np.array(data)
+            msg = PoseHistory() #build a message 
+            msg.vin = self.vin
+            msg.data = list(np.ravel(data))
+            self.state_pub.publish(msg)
+            self.send_state = False # reset the flag
+
+    def publish_point_cloud_merged(self) -> None:
+        """Publish the point clouds we have merged into our own graph.
+        """
+
+        #define the vis colors
+        colors = {1:[255,0,0], 2:[112,158,206], 3:[255,255,0]}
+
+        #define an empty array
+        all_points = [np.zeros((0, 2), np.float32)]
+
+        #list of keyframe ids
+        all_keys = []
+
+        if len(self.keyframes_multi_robot) > 0:
+            for key in range(len(self.keyframes_multi_robot)):
+
+                #parse the pose
+                pose = self.keyframes_multi_robot[key].pose
+
+                #get the resgistered point cloud
+                transf_points = self.keyframes_multi_robot[key].transf_points
+                if transf_points is not None:
+                    all_points.append(transf_points)
+                    all_keys.append(np.ones((len(transf_points),3)) * colors[self.keyframes_multi_robot[key].vin])
+
+            if len(all_keys) == 0:
+                return
+                
+            all_points = np.concatenate(all_points)
+            all_keys = np.concatenate(all_keys)
+
+            #use PCL to downsample this point cloud
+            sampled_points, sampled_keys = pcl.downsample(
+                all_points, all_keys, self.point_resolution
+            )
+
+            #parse the downsampled cloud into the ros xyzi format
+            sampled_xyzi = np.c_[sampled_points, sampled_keys]
+            
+            #if there are no points return and do nothing
+            if len(sampled_xyzi) == 0:
+                return
+
+            #convert the point cloud to a ros message and publish
+            cloud_msg = n2r(sampled_xyzi, "PointCloudXYZRGB")
+            cloud_msg.header.stamp = self.current_keyframe.time
+            cloud_msg.header.frame_id = self.rov_id + "_map"
+            self.merged_pub.publish(cloud_msg)
+
+    def publish_all(self,main: bool=True) -> None:
+        """Publish to all ouput topics
+
+        Args:
+            main (bool, optional): If we are calling this from the SLAM_callback. Defaults to False.
+        """
+
+        # make sure we have some keyframes
+        if not self.keyframes:
+            return
+
+        # don't publish the pose from outside the SLAM callback for timing reasons
+        if main:
+            self.publish_pose()
+
+        # publish all the output topics if this is a new SLAM keyframe in the SLAM callback
+        # or we are running from outside the slam callback
+        if self.current_frame.status or main != False:
+            self.publish_trajectory()
+            self.publish_constraint()
+            self.publish_point_cloud()
+            self.publish_partner_trajectory()
+            self.publish_point_cloud_merged()
+            self.publish_slam_update()
+
+    def filter_by_distance(self,pose_my_frame: gtsam.Pose2,indexes: np.array,distances: np.array,keyframes: list) -> np.array:
+        """Filter the results of a Kd-tree search by the distance between query and neighbors
+
+        Args:
+            pose_my_frame (gtsam.Pose2): the pose of query frame in my own reference frame
+            indexes (np.array): kdtree search results, the indexes of the array
+            distances (np.array): kdtree distance for the above
+            keyframes (list): the keyframes from our own SLAM solution
+
+        Returns:
+            np.array: filtered indexes and distances according to the max rotation and translation 
+        """
+
+        distances_euclidian = []
+        for idx in indexes: #loop over the Kd-tree nearest neighbors
+            #get the pose btween the nearest neighbor and the query frame
+            dist = g2n(keyframes[idx].pose.between(pose_my_frame))
+            distances_euclidian.append(dist) 
+        distances_euclidian = np.array(distances_euclidian) #cast to array
+        rotations = distances_euclidian[:,2] #parse out rotation
+        distances_euclidian = np.linalg.norm(distances_euclidian[:,:2],axis=1) #Parse out ecuclidan distance
+        #filter based on max distance and rotation
+        indexes = indexes[(distances_euclidian<self.mrr_max_translation_search)&(rotations<self.mrr_max_rotation_search)]
+        distances = distances[(distances_euclidian<self.mrr_max_translation_search)&(rotations<self.mrr_max_rotation_search)]
+        return np.array(indexes), np.array(distances)
+
+    def filter_by_distance2(self,my_pose: gtsam.Pose2,vins: np.array,indexes: np.array,distances: np.array)-> np.array:
+        """Filter the indexes and distances by their ecldian distance
+
+        Args:
+            my_pose (gtsam.Pose2): my current pose estimate
+            vins (np.array): the vins for each index
+            indexes (np.array): the index in the keyframes list 
+            distances (np.array): the Kd-tree distance with each index
+
+        Returns:
+            vins (np.array): the filtered vins
+            indexes (np.array): the filtered indexes
+            distances (np.array): the filtered distances
+        """
+        
+        distances_euclidian = []
+        for idx,vin in zip(indexes,vins): #loop over the Kd-tree nearest neighbors
+            
+            #check if we have an initial frame and a source pose for this index
+            if self.home[vin] is not None and self.message_pool[vin].keyframes[idx].source_pose is not None:
+                pose_2 = self.home[vin].compose(self.message_pool[vin].keyframes[idx].source_pose) #their pose in my frame
+                distances_euclidian.append(g2n(my_pose.between(pose_2))) #pose between these
+
+            #we have not merged this robot yet, but we do have a source pose for it, do not filter
+            elif self.home[vin] is None and self.message_pool[vin].keyframes[idx].source_pose is not None:
+                distances_euclidian.append(g2n(gtsam.Pose2(0,0,0))) #push through zeros so this does not get removed
+
+            #not enough information
+            else:
+                distances_euclidian.append(g2n(gtsam.Pose2(500000,500000,500000))) #push a big number so it does get removed
+
+        distances_euclidian = np.array(distances_euclidian) #cast to array
+        rotations = distances_euclidian[:,2] #parse out rotation
+        distances_euclidian = np.linalg.norm(distances_euclidian[:,:2],axis=1) #Parse out ecuclidan distance
+        #filter based on max distance and rotation
+        indexes = indexes[(distances_euclidian<self.mrr_max_translation_search)&(rotations<self.mrr_max_rotation_search)]
+        distances = distances[(distances_euclidian<self.mrr_max_translation_search)&(rotations<self.mrr_max_rotation_search)]
+        vins = vins[(distances_euclidian<self.mrr_max_translation_search)&(rotations<self.mrr_max_rotation_search)]
+        return np.array(vins), np.array(indexes), np.array(distances)
+            
+
 
     
     
