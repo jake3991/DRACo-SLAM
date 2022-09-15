@@ -1,7 +1,7 @@
 # python imports
 import gtsam
 import numpy as np
-from scipy.optimize import shgo
+from scipy.optimize import shgo, differential_evolution
 from scipy.spatial.transform import Rotation
 
 # bruce imports
@@ -12,7 +12,7 @@ from bruce_slam.slam_objects import Keyframe
 
 
 class MultiRobotRegistration:
-    """A class to integrate multi-robot observations into a BRUCE-SLAM solution
+    """A class to integrate register multi-robot observations
     """
 
     def __init__(self,vin:int,number_of_scans:int,k_neighbors:int,bearing_bins:int,max_bearing:float,
@@ -79,6 +79,9 @@ class MultiRobotRegistration:
         self.use_ratio = use_ratio
         self.use_overlap = use_overlap
         self.use_context = use_context
+
+        # define the optimizer we want to use
+        self.optimizer_mode = 1 # 1 is shgo 2 is differential
 
         #setup ICP
         self.icp = pcl.ICP()
@@ -303,21 +306,20 @@ class MultiRobotRegistration:
         return subroutine, pose_samples
 
     def global_pose_optimization_execute(self,subroutine,bounds=None)->np.array:
-        '''Using the provided subroutine, use scipy SHGO to find a pose
-        subroutine: the function to be minimized
-        returns: shgo result object
-        '''
+        """Using the provided subroutine, use scipy SHGO to find a pose
+
+        Args:
+            subroutine (function): the function to be minimized
+            bounds (_type_, optional): _description_. Defaults to None.
+
+        Returns:
+            np.array: the minimizer result
+        """
 
         if bounds is None:
-            return shgo(func=subroutine,
-                        bounds=self.pose_bounds,
-                        n=self.sampling_points,
-                        iters=self.iterations, 
-                        sampling_method="sobol",
-                        minimizer_kwargs={
-                            "options": {"ftol": self.tolerance}},
-                        )
-        else:
+            bounds = self.pose_bounds
+
+        if self.optimizer_mode == 1:
             return shgo(func=subroutine,
                         bounds=bounds,
                         n=self.sampling_points,
@@ -326,6 +328,11 @@ class MultiRobotRegistration:
                         minimizer_kwargs={
                             "options": {"ftol": self.tolerance}},
                         )
+
+        elif self.optimizer_mode == 2:
+            return differential_evolution(func=subroutine,
+                                        bounds=bounds,
+                                            seed=10)
 
     def compare_frames(self,frame_self:Keyframe,frame_multi_robot:Keyframe):
         """manage the search for loop closures given two keyframes
