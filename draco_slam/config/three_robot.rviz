@@ -4,8 +4,9 @@ Panels:
     Name: Displays
     Property Tree Widget:
       Expanded:
+        - /Global Options1
         - /robot one pose1/Status1
-      Splitter Ratio: 0.5
+      Splitter Ratio: 0.5022971034049988
     Tree Height: 397
   - Class: rviz/Selection
     Name: Selection
@@ -348,7 +349,7 @@ Visualization Manager:
       Color: 238; 238; 236
       Color Transformer: FlatColor
       Decay Time: 1e+08
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
@@ -363,7 +364,7 @@ Visualization Manager:
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -376,7 +377,7 @@ Visualization Manager:
       Color: 238; 238; 236
       Color Transformer: FlatColor
       Decay Time: 1e+08
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
@@ -391,7 +392,7 @@ Visualization Manager:
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -404,7 +405,7 @@ Visualization Manager:
       Color: 238; 238; 236
       Color Transformer: FlatColor
       Decay Time: 1e+08
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
@@ -419,7 +420,7 @@ Visualization Manager:
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -432,7 +433,7 @@ Visualization Manager:
       Color: 114; 159; 207
       Color Transformer: RGB8
       Decay Time: 0
-      Enabled: true
+      Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
@@ -447,7 +448,7 @@ Visualization Manager:
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -460,7 +461,7 @@ Visualization Manager:
       Color: 239; 41; 41
       Color Transformer: RGB8
       Decay Time: 0
-      Enabled: true
+      Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
@@ -475,7 +476,7 @@ Visualization Manager:
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -488,7 +489,7 @@ Visualization Manager:
       Color: 239; 41; 41
       Color Transformer: RGB8
       Decay Time: 0
-      Enabled: true
+      Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
@@ -503,7 +504,7 @@ Visualization Manager:
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Class: rviz/Marker
       Enabled: true
       Marker Topic: /rov_one/partner_traj
@@ -565,29 +566,29 @@ Visualization Manager:
       Unreliable: false
       Value: true
     - Class: rviz/Marker
-      Enabled: false
-      Marker Topic: /rov_one/slam/poses_loops
-      Name: Marker
+      Enabled: true
+      Marker Topic: /rov_one/inter_robot_constraint
+      Name: robot one inter robot loops
       Namespaces:
-        {}
+        constraints: true
       Queue Size: 100
-      Value: false
+      Value: true
     - Class: rviz/Marker
-      Enabled: false
-      Marker Topic: /rov_two/slam/poses_loops
-      Name: Marker
+      Enabled: true
+      Marker Topic: /rov_two/inter_robot_constraint
+      Name: robot two inter robot loops
       Namespaces:
-        {}
+        constraints: true
       Queue Size: 100
-      Value: false
+      Value: true
     - Class: rviz/Marker
-      Enabled: false
-      Marker Topic: /rov_three/slam/poses_loops
-      Name: Marker
+      Enabled: true
+      Marker Topic: /rov_three/inter_robot_constraint
+      Name: robot three inter robot loops
       Namespaces:
-        {}
+        constraints: true
       Queue Size: 100
-      Value: false
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 0; 0; 0
@@ -616,7 +617,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 153.55715942382812
+      Distance: 177.85057067871094
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -624,9 +625,9 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 16.67951202392578
-        Y: -82.48062896728516
-        Z: -4.307432651519775
+        X: 20.141599655151367
+        Y: -80.62907409667969
+        Z: -4.303976535797119
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false

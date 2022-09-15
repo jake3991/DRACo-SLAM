@@ -237,7 +237,7 @@ class MultiRobotSLAM(SLAMNode):
                                                                                 queue_size=50)
         
         # shutdown sub
-        self.shutdown_sub = rospy.Subscriber("/" + self.rov_id + "/slam/shutdown", Dummy, callback=self.shutdown_callback,
+        self.shutdown_sub = rospy.Subscriber("/" + self.rov_id + "/shutdown", Dummy, callback=self.shutdown_callback,
                                                                                 queue_size=50)
 
         #multi-robot registration results
@@ -246,6 +246,10 @@ class MultiRobotSLAM(SLAMNode):
 
         self.merged_pub = rospy.Publisher(
             "merged", PointCloud2, queue_size=5)
+
+        #constraints between poses
+        self.inter_robot_constraint_pub = rospy.Publisher(
+            "inter_robot_constraint", Marker, queue_size=1, latch=True)
 
         self.partner_traj_pub = rospy.Publisher(
             PARTNER_TRAJECTORY_TOPIC, Marker, queue_size=1, latch=True)
@@ -280,6 +284,7 @@ class MultiRobotSLAM(SLAMNode):
         self.partner_covariance_log = {}
         self.tested_jobs = {}
         self.outside_frames_added = {}
+        self.loops_added = {}
         keys = ["y","z"]
         for robot,k in zip(robots,keys):
             self.partner_trajectory[robot] = []
@@ -493,7 +498,7 @@ class MultiRobotSLAM(SLAMNode):
 
             # euclidan space filtering
             if len(job_indexes) != 0:
-                vin_for_jobs, job_indexes, distances = self.filter_by_distance2(self.keyframes[-2].pose,
+                vin_for_jobs, job_indexes, distances = self.filter_by_distance_2(self.keyframes[-2].pose,
                                                                                 np.array(vin_for_jobs),
                                                                                 np.array(job_indexes),
                                                                                 np.array(distances))
@@ -636,7 +641,6 @@ class MultiRobotSLAM(SLAMNode):
         self.lock.release() #release the lock so we can do PCM without holding up other threads
 
         #call PCM
-        # here we do not use PCM for ALCS loop closures only DRACO
         if self.use_pcm:
             pcm = self.verify_pcm(queue, self.multi_robot_min_pcm)
         else:
@@ -653,7 +657,52 @@ class MultiRobotSLAM(SLAMNode):
         self.dummy_pub.publish(Dummy())
         
     def loop_closure_callback(self, msg : LoopClosure) -> None:
-        pass
+        """Handle a inter-robot loop closure found by another robot and sent to us. 
+
+        Args:
+            msg (LoopClosure): the loop closure message
+        """
+
+        # if this loop closure does not concern me, I do not care about it
+        if msg.loop_vin != self.vin:
+            return
+
+        self.lock.acquire()
+
+        # check if we aleady have this loop closure
+        if (msg.vin, msg.target_key) not in self.outside_frames_added: 
+            self.outside_frames_added[(msg.vin,msg.target_key)] = True
+
+            # add the factor to the SLAM solution
+            icp_transform = n2g(np.array(list(msg.data)),"Pose2").inverse() #make sure to get the inverse
+            factor = gtsam.BetweenFactorPose2(
+                            X(msg.source_key),
+                            self.to_symbol(msg.target_key,msg.vin),
+                            icp_transform,
+                            self.inter_robot_model)
+            self.graph.add(factor)
+
+            # if not we need to get an initial guess and build a keyframe
+            target_pose = self.keyframes[msg.source_key].pose.compose(icp_transform) #get the pose in this robots frame
+            self.keyframes_multi_robot.append(Keyframe(
+                        True,
+                        None,
+                        pose223(target_pose),
+                        ros_numpy.point_cloud2.pointcloud2_to_xyz_array(msg.cloud)[:,:2], 
+                        source_pose=self.message_pool[msg.vin].keyframes[msg.target_key].source_pose,
+                        index=msg.target_key,
+                        vin=msg.vin,
+                        index_kf=msg.source_key))
+            
+            # add an initial guess
+            self.values.insert(self.to_symbol(msg.target_key,msg.vin), target_pose)
+
+            # mark that this robot has been merged
+            self.merged_robots[msg.vin] = True
+            
+        self.update_factor_graph() #update the factor graph
+        self.publish_all(False)
+        self.lock.release()
         
     def state_update_callback(self, msg : PoseHistory) -> None:
         """Handle an incoming state update message
@@ -686,6 +735,7 @@ class MultiRobotSLAM(SLAMNode):
 
         # shutdown is easy, just get the lock and never let it go
         self.lock.acquire()
+        print(self.rov_id,"shutdown")
 
     def get_scan_context(self,points : np.array) -> np.array:
         """Perform scan context for an aggragated point cloud
@@ -939,10 +989,11 @@ class MultiRobotSLAM(SLAMNode):
                         self.to_symbol(target_key,vin),
                         pose_between,
                         self.inter_robot_model)
-
-                #add the factor and the initial guess
                 self.graph.add(factor)
-                if (vin,target_key) not in self.outside_frames_added: # check if we have an initial guess yet
+
+                # check if we have this loop closure yet
+                if (vin,target_key) not in self.outside_frames_added:
+                    self.outside_frames_added[(vin,target_key)] = True 
                     self.keyframes_multi_robot.append(Keyframe(
                                             True,
                                             None,
@@ -952,7 +1003,6 @@ class MultiRobotSLAM(SLAMNode):
                                             index=target_key,
                                             vin = vin,
                                             index_kf=source_key))
-                    self.outside_frames_added[(vin,target_key)] = True # update the hash table of added frames
                     self.values.insert(self.to_symbol(target_key,vin), target_pose) # insert the intial guess
 
     def publish_loop_closure(self,source_key:int,target_key:int,pose_between:gtsam.Pose2,vin:int)->None:
@@ -1228,6 +1278,25 @@ class MultiRobotSLAM(SLAMNode):
             cloud_msg.header.stamp = self.current_keyframe.time
             cloud_msg.header.frame_id = self.rov_id + "_map"
             self.merged_pub.publish(cloud_msg)
+    
+    def publish_multi_robot_constraints(self) -> None:
+        """Publish the multi-robot factors as blue lines.
+        """
+
+        links = []
+
+        # get the interrobot loops
+        for frame in self.keyframes_multi_robot:
+            p1 = frame.pose3.x(), frame.pose3.y(), frame.dr_pose3.z()
+            p2 = self.keyframes[frame.index_kf].pose3.x(), self.keyframes[frame.index_kf].pose3.y(), self.keyframes[frame.index_kf].dr_pose3.z()
+            links.append((p1, p2, "blue"))
+
+        # convert this list to a series of multi-colored lines and publish
+        if links:
+            link_msg = ros_constraints(links)
+            link_msg.header.stamp = self.current_keyframe.time
+            link_msg.header.frame_id = self.rov_id + "_map"
+            self.inter_robot_constraint_pub.publish(link_msg)
 
     def publish_all(self,main: bool=True) -> None:
         """Publish to all ouput topics
@@ -1253,6 +1322,7 @@ class MultiRobotSLAM(SLAMNode):
             self.publish_partner_trajectory()
             self.publish_point_cloud_merged()
             self.publish_slam_update()
+            self.publish_multi_robot_constraints()
 
     def filter_by_distance(self,pose_my_frame: gtsam.Pose2,indexes: np.array,distances: np.array,keyframes: list) -> np.array:
         """Filter the results of a Kd-tree search by the distance between query and neighbors
@@ -1280,7 +1350,7 @@ class MultiRobotSLAM(SLAMNode):
         distances = distances[(distances_euclidian<self.mrr_max_translation_search)&(rotations<self.mrr_max_rotation_search)]
         return np.array(indexes), np.array(distances)
 
-    def filter_by_distance2(self,my_pose: gtsam.Pose2,vins: np.array,indexes: np.array,distances: np.array)-> np.array:
+    def filter_by_distance_2(self,my_pose: gtsam.Pose2,vins: np.array,indexes: np.array,distances: np.array)-> np.array:
         """Filter the indexes and distances by their ecldian distance
 
         Args:
