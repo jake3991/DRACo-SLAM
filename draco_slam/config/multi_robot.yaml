@@ -22,10 +22,6 @@ study:
   context: True
   pcm: True
   point_compression: False
-  use_multi_robot: True
-  add_multi_robot: True
-  play_bag: True
-  share_loops: True
 
 #registration params
 mrr: #(multi-robot-registration)
@@ -56,13 +52,4 @@ plcs: #(partner loop closure search)
   max_rotation_search: 1.0472 #radians
 
 # active loop closure search parameters
-alcs:
-  enable: True # are we using the module?
-  passive_count: 2 # the number of passive loop closures required to begin active search
-  uncertainty: .10 # the uncertinaty level that warrants loop closure
-  point_count: 30 # the min number of points that overlap without ICP to warrant loop closure
-  delta_uncertainty: .20 # the min improvment to exchange data
-  uncertainty_max: 6.0
-  bits_max: 30000 #75000 #30000 #not use 55000 32000
-  roi: 0.0
-  covariance_prediction_samples: 20
+

@@ -158,10 +158,6 @@ class MultiRobotSLAM(SLAMNode):
         self.use_context = rospy.get_param(ns + "study/context")
         self.use_pcm = rospy.get_param(ns + "study/pcm")
         self.point_compression = rospy.get_param(ns + "study/point_compression")
-        self.use_multi_robot = rospy.get_param(ns + "study/use_multi_robot")
-        self.add_multi_robot = rospy.get_param(ns + "study/add_multi_robot")
-        self.play_bag = rospy.get_param(ns + "study/play_bag")
-        self.share_loops = rospy.get_param(ns + "study/share_loops")
 
         #point cloud compression
         self.point_compression_resolution = rospy.get_param(ns + "point_compression_resolution")
@@ -197,17 +193,6 @@ class MultiRobotSLAM(SLAMNode):
         self.sc_max_bearing = rospy.get_param(ns + "sc/max_bearing")
         self.sc_range_bins = rospy.get_param(ns + "sc/range_bins")
         self.sc_max_range = rospy.get_param(ns + "sc/max_range")
-
-        #active alcs closure search
-        self.alcs_enable = rospy.get_param(ns + "alcs/enable")
-        self.alcs_passive_count = rospy.get_param(ns + "alcs/passive_count")
-        self.alcs_uncertainty = rospy.get_param(ns + "alcs/uncertainty")
-        self.alcs_point_count = rospy.get_param(ns + "alcs/point_count")
-        self.alcs_uncertainty_max = rospy.get_param(ns + "alcs/uncertainty_max")
-        self.alcs_bits_max = rospy.get_param(ns + "alcs/bits_max")
-        self.alcs_roi = float(rospy.get_param(ns + "alcs/roi"))
-        self.alcs_covariance_prediction_samples = rospy.get_param(ns + "alcs/covariance_prediction_samples")
-
 
         #define all the publishers and subscribers for the multi-robot system
 
@@ -457,57 +442,7 @@ class MultiRobotSLAM(SLAMNode):
                 self.dummy_pub.publish(Dummy()) # this kicks the registration callback 
  
             self.lock.release()
-
-    def query_tree(self) -> None:
-        """Similar to the ring key callback above except here we compare the most recent
-        SLAM keyframe from MY system to all the recived ring keys so far. 
-        1. pull the most recent ring key
-        2. compare it to the recived ring keys
-        3. log anything we need to inspect furthur in self.frames_to_check
-        """
-
-        if len(self.keyframes) < 3:
-            return
-
-        # combine all the ring keys from all the robots, track their offests
-        keys = []
-        vin_list = []
-        real_indexes = []
-        for vin in self.robots: # loop over the other robots in the system
-            keys_i = self.message_pool[vin].get_ring_keys() #get the ring keys from this robot
-            keys += keys_i #add these keys to the list
-            for i in range(len(keys_i)):
-                vin_list.append(vin) # create an array of vin numbers to go along with each key
-                real_indexes.append(i) # index tracker
-
-        if len(keys) > 0: # if we have any ring keys at all
-
-            # build a query a KD tree, we are searching for matches with OUR most recent SLAM frame
-            tree = KDTree(np.array(keys))
-            distances, indexes = tree.query(self.keyframes[-2].ring_key, k=self.mrr_k_neighbors, distance_upper_bound=self.mrr_max_tree_cost)
-            indexes = indexes[distances < float('inf')] #filter out inf values
-            distances = distances[distances < float('inf')]
-
-            # get the vin for each nearest neighbor
-            # here we also clean up the indexes getting the index in the keyframe list
-            vin_for_jobs = []
-            job_indexes = []
-            for id in indexes:
-                vin_for_jobs.append(vin_list[id]) # get vin
-                job_indexes.append(real_indexes[id]) # get the index in the vin.keyframes
-
-            # euclidan space filtering
-            if len(job_indexes) != 0:
-                vin_for_jobs, job_indexes, distances = self.filter_by_distance_2(self.keyframes[-2].pose,
-                                                                                np.array(vin_for_jobs),
-                                                                                np.array(job_indexes),
-                                                                                np.array(distances))
-
-            # log the job to the job quene to be run by the global reg callback
-            if len(job_indexes) != 0:
-                self.frames_to_check.append(([len(self.keyframes)-2], job_indexes, vin_for_jobs))
-                self.dummy_pub.publish(Dummy()) # send a message to trip the callback
-                
+            
     def request_callback(self, msg : DataRequest) -> None:
         """This callback handles the requests for point clouds.
         If we recive a request we need to fulfill it by simply sending
@@ -737,6 +672,56 @@ class MultiRobotSLAM(SLAMNode):
         self.lock.acquire()
         print(self.rov_id,"shutdown")
 
+    def query_tree(self) -> None:
+        """Similar to the ring key callback above except here we compare the most recent
+        SLAM keyframe from MY system to all the recived ring keys so far. 
+        1. pull the most recent ring key
+        2. compare it to the recived ring keys
+        3. log anything we need to inspect furthur in self.frames_to_check
+        """
+
+        if len(self.keyframes) < 3:
+            return
+
+        # combine all the ring keys from all the robots, track their offests
+        keys = []
+        vin_list = []
+        real_indexes = []
+        for vin in self.robots: # loop over the other robots in the system
+            keys_i = self.message_pool[vin].get_ring_keys() #get the ring keys from this robot
+            keys += keys_i #add these keys to the list
+            for i in range(len(keys_i)):
+                vin_list.append(vin) # create an array of vin numbers to go along with each key
+                real_indexes.append(i) # index tracker
+
+        if len(keys) > 0: # if we have any ring keys at all
+
+            # build a query a KD tree, we are searching for matches with OUR most recent SLAM frame
+            tree = KDTree(np.array(keys))
+            distances, indexes = tree.query(self.keyframes[-2].ring_key, k=self.mrr_k_neighbors, distance_upper_bound=self.mrr_max_tree_cost)
+            indexes = indexes[distances < float('inf')] #filter out inf values
+            distances = distances[distances < float('inf')]
+
+            # get the vin for each nearest neighbor
+            # here we also clean up the indexes getting the index in the keyframe list
+            vin_for_jobs = []
+            job_indexes = []
+            for id in indexes:
+                vin_for_jobs.append(vin_list[id]) # get vin
+                job_indexes.append(real_indexes[id]) # get the index in the vin.keyframes
+
+            # euclidan space filtering
+            if len(job_indexes) != 0:
+                vin_for_jobs, job_indexes, distances = self.filter_by_distance_2(self.keyframes[-2].pose,
+                                                                                np.array(vin_for_jobs),
+                                                                                np.array(job_indexes),
+                                                                                np.array(distances))
+
+            # log the job to the job quene to be run by the global reg callback
+            if len(job_indexes) != 0:
+                self.frames_to_check.append(([len(self.keyframes)-2], job_indexes, vin_for_jobs))
+                self.dummy_pub.publish(Dummy()) # send a message to trip the callback
+                
     def get_scan_context(self,points : np.array) -> np.array:
         """Perform scan context for an aggragated point cloud
 
