@@ -20,11 +20,10 @@ from draco_slam.utils.topics import *
 
 
 class DeadReckoningNodeMultiRobot(DeadReckoningNode):
-
     def __init__(self) -> None:
         super().__init__()
 
-    def init_node(self, ns="~")->None:
+    def init_node(self, ns="~") -> None:
         """Init the node, fetch all paramaters from ROS
 
         Args:
@@ -52,21 +51,25 @@ class DeadReckoningNodeMultiRobot(DeadReckoningNode):
             self.imu_sub = Subscriber(IMU_TOPIC_MK_II, Imu)
 
         # Use point cloud for visualization
-        self.traj_pub = rospy.Publisher(
-            "traj_dead_reck", PointCloud2, queue_size=10)
+        self.traj_pub = rospy.Publisher("traj_dead_reck", PointCloud2, queue_size=10)
 
         self.odom_pub = rospy.Publisher(
-            LOCALIZATION_ODOM_TOPIC, Odometry, queue_size=10)
+            LOCALIZATION_ODOM_TOPIC, Odometry, queue_size=10
+        )
 
         # are we using the FOG gyroscope?
         self.use_gyro = rospy.get_param(ns + "use_gyro")
 
         # define the callback, are we using the gyro or the VN100?
         if self.use_gyro:
-            self.ts = ApproximateTimeSynchronizer([self.imu_sub, self.dvl_sub, self.gyro_sub], 300, .1)
+            self.ts = ApproximateTimeSynchronizer(
+                [self.imu_sub, self.dvl_sub, self.gyro_sub], 300, 0.1
+            )
             self.ts.registerCallback(self.callback_with_gyro)
         else:
-            self.ts = ApproximateTimeSynchronizer([self.imu_sub, self.dvl_sub], 200, .1)
+            self.ts = ApproximateTimeSynchronizer(
+                [self.imu_sub, self.dvl_sub], 200, 0.1
+            )
             self.ts.registerCallback(self.callback)
 
         self.tf = tf.TransformBroadcaster()
@@ -74,9 +77,8 @@ class DeadReckoningNodeMultiRobot(DeadReckoningNode):
         print(self.pose)
         rospy.loginfo("Localization node is initialized")
 
-    def publish_pose(self,flag)->None:
-        """Publish the pose
-        """
+    def publish_pose(self, flag) -> None:
+        """Publish the pose"""
         if self.pose is None:
             return
 
@@ -108,6 +110,9 @@ class DeadReckoningNodeMultiRobot(DeadReckoningNode):
         p = odom_msg.pose.pose.position
         q = odom_msg.pose.pose.orientation
         self.tf.sendTransform(
-            (p.x, p.y, p.z), (q.x, q.y, q.z, q.w), header.stamp, self.rov_id + "_base_link", self.rov_id + "_odom"
+            (p.x, p.y, p.z),
+            (q.x, q.y, q.z, q.w),
+            header.stamp,
+            self.rov_id + "_base_link",
+            self.rov_id + "_odom",
         )
-
