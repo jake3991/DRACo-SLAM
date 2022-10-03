@@ -50,6 +50,3 @@ sc:
 plcs: #(partner loop closure search)
   max_translation_search: 10 #meters
   max_rotation_search: 1.0472 #radians
-
-# active loop closure search parameters
-
