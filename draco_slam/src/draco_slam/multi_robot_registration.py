@@ -15,11 +15,27 @@ class MultiRobotRegistration:
     """A class to integrate register multi-robot observations
     """
 
-    def __init__(self,vin:int,number_of_scans:int,k_neighbors:int,bearing_bins:int,max_bearing:float,
-                        range_bins:int,max_range:float,max_translation:float,max_rotation:float,
-                        min_overlap:float,min_points:int,points_ratio:float,
-                        sampling_points:int,iterations:int,tolerance:float,
-                        max_scan_context:float,use_count:bool,use_ratio:bool,use_overlap:bool,use_context:bool,icp_path:str) -> None:
+    def __init__(self,vin:int,
+                        number_of_scans:int,
+                        k_neighbors:int,
+                        bearing_bins:int,
+                        max_bearing:float,
+                        range_bins:int,
+                        max_range:float,
+                        max_translation:float,
+                        max_rotation:float,
+                        min_overlap:float,
+                        min_points:int,
+                        points_ratio:float,
+                        sampling_points:int,
+                        iterations:int,
+                        tolerance:float,
+                        max_scan_context:float,
+                        use_count:bool,
+                        use_ratio:bool,
+                        use_overlap:bool,
+                        use_context:bool,
+                        icp_path:str) -> None:
 
         """Class constructor
 
@@ -47,10 +63,10 @@ class MultiRobotRegistration:
             icp_path (str): the path to the ICP config
         """
 
-        #get our own robot vin
+        # get our own robot vin
         self.robot_id = vin
 
-        #instanciate the class data fields
+        # instanciate the class data fields
         self.number_of_scans = number_of_scans
         self.k_neighbors = k_neighbors
         self.bearing_bins = bearing_bins
@@ -58,7 +74,7 @@ class MultiRobotRegistration:
         self.range_bins = range_bins
         self.max_range = max_range
 
-        #define some paramters for the global optimizer
+        # define some paramters for the global optimizer
         self.max_translation = max_translation
         self.max_rotation = max_rotation
         self.pose_bounds = np.array([[-self.max_translation,self.max_translation],
@@ -68,13 +84,13 @@ class MultiRobotRegistration:
         self.iterations = iterations
         self.tolerance = tolerance
 
-        #define the outliar rejection parameters
+        # define the outliar rejection parameters
         self.min_overlap = min_overlap
         self.min_points = min_points
         self.points_ratio = points_ratio
         self.max_scan_context = max_scan_context
 
-        #define the ablation study parameters
+        # define the ablation study parameters
         self.use_count = use_count
         self.use_ratio = use_ratio
         self.use_overlap = use_overlap
@@ -83,12 +99,12 @@ class MultiRobotRegistration:
         # define the optimizer we want to use
         self.optimizer_mode = 1 # 1 is shgo 2 is differential
 
-        #setup ICP
+        # setup ICP
         self.icp = pcl.ICP()
         self.icp.loadFromYaml(icp_path)
 
-        #define some objects to track our slam solution
-        self.keyframes = [] #this will be a list of keyframes
+        # define some objects to track our slam solution
+        self.keyframes = [] # this will be a list of keyframes
 
         # we need three dummy frames to start
         for i in range(3):
@@ -100,11 +116,14 @@ class MultiRobotRegistration:
             self.keyframes.append(frame)
 
         # keep a list of the context images and ring keys for quick access
-        self.scan_context_list = [] #list of scan context images
-        self.ring_key_list = [] #list of scan context ring keys
+        # self.scan_context_list = [] #list of scan context images
+        # self.ring_key_list = [] #list of scan context ring keys
 
     def get_ring_keys(self) -> list:
         """Return all the ring keys in the system
+
+        Returns:
+            list: a list of the systems ring keys.
         """
 
         keys = [] 
@@ -113,7 +132,7 @@ class MultiRobotRegistration:
                 keys.append(frame.ring_key)
         return keys
 
-    def add_keyframe_ring_key(self,keyframe:Keyframe)->None:
+    def add_keyframe_ring_key(self,keyframe: Keyframe) -> None:
         """Add a keyframe that only has a ring key
 
         Args:
@@ -158,7 +177,7 @@ class MultiRobotRegistration:
             keyframe_id (int): the index of the keyframe we want a scan context image for
         """
 
-        assert(keyframe_id > 0) #catch some silly cases
+        assert(keyframe_id > 0) # catch some silly cases
         self.keyframes[keyframe_id].submap = self.get_points([keyframe_id-1,keyframe_id,keyframe_id+1], keyframe_id)
         context, ring_key = self.get_scan_context_aggragated(self.keyframes[keyframe_id].submap)
         self.keyframes[keyframe_id].ring_key = ring_key
@@ -209,28 +228,33 @@ class MultiRobotRegistration:
             return pcl.downsample(all_points, 0.5)
 
     def get_scan_context_aggragated(self,points:np.array)->np.array:
-        '''Perform scan context for an aggragated point cloud
-        returns: scan context image and ring key
-        '''
+        """Perform scan context for an aggragated point cloud
 
-        #instanciate the image
+        Args:
+            points (np.array): the point cloud we want converted to a ring key and context image
+
+        Returns:
+            np.array: the ring key and scan context image
+        """
+
+        # instanciate the image
         polar_image = np.zeros((self.bearing_bins,self.range_bins))
 
-        #convert to discrete polar coords
-        r_cont = np.sqrt(np.square(points[:,0]) + np.square(points[:,1])) #first contiuous polar coords
+        # convert to discrete polar coords
+        r_cont = np.sqrt(np.square(points[:,0]) + np.square(points[:,1])) # first contiuous polar coords
         b_cont = abs(np.degrees(np.arctan2(points[:,0] , points[:,1]))) #* np.sign(points[:,0])
-        r_dis = np.array((r_cont / self.max_range) * self.range_bins).astype(np.uint16) #discret coords
+        r_dis = np.array((r_cont / self.max_range) * self.range_bins).astype(np.uint16) # discret coords
         b_dis = np.array((((b_cont / self.max_bearing) + 1) / 2) * self.bearing_bins).astype(np.uint16)
 
-        #clip the vales
+        # clip the vales
         r_dis = np.clip(r_dis, 0, self.range_bins-1)
         b_dis = np.clip(b_dis, 0, self.bearing_bins-1)
 
-        #populate the image
+        # populate the image
         for i, j in zip(b_dis, r_dis):
             polar_image[i][j] = 1
 
-        #build the ring key
+        # build the ring key
         ring_key = np.sum(polar_image, axis = 0)
 
         return polar_image, ring_key 
