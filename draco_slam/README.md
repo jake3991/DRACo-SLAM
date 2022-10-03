@@ -9,7 +9,7 @@ This system searches for inter-robot loop closures using only sensor data with N
 
 This shows an example pose graph for a single robot with one other team member, note we can have N team members. Yellow circles indicate the robot's own poses. Grey circles show the team members' poses. Green lines are odometry factors between our own poses (from dead reckoning DVL+IMU). Red lines show intra-robot loop closures, the loops we find with ourselves. Blue lines show inter-robot loop closures, and purple lines show partner robot factors and the team members' trajectory. 
 
-# Paramater overview
+# Parameter overview
 Here we provide documentation of each parameter in the multi-robot SLAM system. Once again, tune at your own risk. These parameters are in the config folder in multi_robot.yaml.
 
 PCM 
