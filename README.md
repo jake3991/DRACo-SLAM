@@ -1,7 +1,7 @@
 # DRACo-SLAM 
 ## Distributed Robust Acoustic Communication-efficient SLAM for Imaging Sonar Equipped Underwater Robot Teams
 
-Welcome! This repo contains the code for DRACo-SLAM, a distributed multi-robot SLAM system for underwater robots using imaging sonar for perception. This system is based on our single agent slam system, extending it to estimate each robot's pose but also the poses of team members. Real data is used with simulated communications. For more information on the single agent SLAM system, see this repo LINK HERE. Note that the single agent SLAM system uses DVL, IMU, and imaging sonar. 
+Welcome! This repo contains the code for DRACo-SLAM, a distributed multi-robot SLAM system for underwater robots using imaging sonar for perception. This system is based on our single agent slam system, extending it to estimate each robot's pose but also the poses of team members. Real data is used with simulated communications. For more information on the single agent SLAM system, see this [repo](https://github.com/jake3991/sonar-SLAM). Note that the single agent SLAM system uses DVL, IMU, and imaging sonar. 
 
 Detailed documentation on the DRACo-SLAM system can be found in the DRACo-SLAM folder and paper. 
 
@@ -67,7 +67,7 @@ This multi-robot SLAM system has many parameters. Please review the readme in th
 For a high-level overview of this systems functionality, see the presentation video here LINK NEEDED on my YouTube channel. 
 
 # Citation
-ARXIV LINK HERE
+Paper arxiv link: https://arxiv.org/abs/2210.00867
 
 ```
 @inproceedings{
