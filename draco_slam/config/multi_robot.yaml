@@ -1,6 +1,6 @@
 #PCM outliar rejection params
 multi_robot_pcm_queue_size: 5
-multi_robot_min_pcm: 2
+multi_robot_min_pcm: 3
 
 #noise models for multo-robot factors
 inter_robot_sigmas: [0.1, 0.1, 0.01]
